@@ -33,7 +33,7 @@ async function getAuthToken() {
 
 // Get the global/environment/business-level feature flags from
 //  the Kinde Management API
-export async function GET() {
+async function getEnvironmentFeatureFlags() {
   try {
     const token = await getAuthToken();
     
@@ -48,11 +48,67 @@ export async function GET() {
     );
 
     const data = await response.json();
-    return NextResponse.json(data);
+    const flags = data?.feature_flags;
+
+
+    console.log(data);
+    // .forEach
+    console.log("flags are being logged:", flags);
+
+    // .map (build a new array, e.g. keyed by code)
+    const byCode = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, any]) => [key, value.value ]));
+    console.log(byCode);
+
+    // create dictionary of flags with the flag name ad the key and the flag value.value (eg. "flag_name": true") as the value
+    
+
+    // return NextResponse.json(byCode);
+    return byCode;
   } catch (error) {
-    return NextResponse.json(
-      { error: "Failed to fetch feature flags" },
-      { status: 500 }
-    );
+    return 
+      { error: (error as Error).message }
   }
+}
+
+// Get the feature flags by specific organization
+async function getOrganizationFeatureFlags(organizationId: string) {
+
+
+  try {
+    const token = await getAuthToken();
+    const response = await fetch(
+      `${process.env.KINDE_ISSUER_URL}/api/v1/organizations/${organizationId}/feature_flags`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json"
+        }
+      }
+    );
+    const data = await response.json();
+    console.log("data are being logged on the organization function:", data);
+    const flags = data?.feature_flags;
+
+
+    console.log("flags are being logged on the organization function:", flags);
+
+    const orgFeatureFlags = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, any]) => [key, value.value ]));
+    console.log(orgFeatureFlags);
+
+    return orgFeatureFlags;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+}
+
+export async function GET() {
+  console.log("We are getting everything...")
+  const orgId = "org_dddca967a530";
+
+  const flags = await getEnvironmentFeatureFlags();
+  const organizationFlags = await getOrganizationFeatureFlags(orgId);
+  console.log("OrganizationFlags are being logged on the last function:", organizationFlags);
+
+  console.log("We are getting everything... done")
+  return NextResponse.json({"Flags": flags, [`${orgId}`]: organizationFlags});
 }
