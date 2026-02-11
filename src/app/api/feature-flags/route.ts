@@ -1,7 +1,50 @@
 import { NextResponse } from "next/server";
 
+
+
+// Below we add a label for interfaces
+
+// -----------------------------------------------------------------------------
+// Interfaces
+// -----------------------------------------------------------------------------
+
+
+interface KindeFlag {
+  value: string | boolean | number;
+}
+
+/**
+ * 
+ * Computes which flags are overridden per organization by calculating the difference 
+ * between the global/environment flag value and the organization flag value. 
+ * 
+ * @param envFlags - Environment (business-level) flags: type, value
+ * @param orgFlags - Organization flags: type, value
+ * @returns Map of flag code -> true if overriden (environment_flag.value != organization_flag.value)
+ * 
+ */
+function computeOverrides(
+  envFlags: Record<string, unknown>,
+  orgFlags: Record<string, unknown>
+): Record<string, boolean> {
+  const overrides_tracker: Record<string, boolean> = Object.fromEntries(
+    Object.keys(envFlags).map((key) => [
+      key,
+      envFlags[key] !== orgFlags[key],
+    ])
+  );
+  return overrides_tracker;
+}
+
+/**
+ * 
+ * Retrieves the authentication token needed to make API calls to the Kinde Management API. 
+ * 
+ * @returns The access token. 
+ * 
+ */
 async function getAuthToken() {
-   // Get the environment variables for the Kinde M2M client
+  // Get the environment variables for the Kinde M2M client
   const issuerUrl = process.env.KINDE_ISSUER_URL;
   const m2mClientId = process.env.KINDE_M2M_CLIENT_ID;
   const m2mClientSecret = process.env.KINDE_M2M_CLIENT_SECRET;
@@ -31,12 +74,17 @@ async function getAuthToken() {
   return data.access_token;
 }
 
-// Get the global/environment/business-level feature flags from
-//  the Kinde Management API
+/**
+ * 
+ * Fetches environment-level feature flags from Kinde and returns them as a flat map. 
+ * 
+ * @returns A map of feature flags with the flag name and the value. 
+ * 
+ */
 async function getEnvironmentFeatureFlags() {
   try {
     const token = await getAuthToken();
-    
+
     const response = await fetch(
       `${process.env.KINDE_ISSUER_URL}/api/v1/environment/feature_flags`,
       {
@@ -47,30 +95,29 @@ async function getEnvironmentFeatureFlags() {
       }
     );
 
-    const data = await response.json();
-    const flags = data?.feature_flags;
+    const data = await response.json() as { feature_flags: Record<string, KindeFlag> };
+    const flags = data?.feature_flags ?? {};
 
+    if ('error' in data) {
+      return { error: data.error };
+    }
 
-    console.log(data);
-    // .forEach
-    console.log("flags are being logged:", flags);
+    const envFeatureFlags = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, KindeFlag]) => [key, value.value]));
 
-    // .map (build a new array, e.g. keyed by code)
-    const byCode = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, any]) => [key, value.value ]));
-    console.log(byCode);
+    return envFeatureFlags
 
-    // create dictionary of flags with the flag name ad the key and the flag value.value (eg. "flag_name": true") as the value
-    
-
-    // return NextResponse.json(byCode);
-    return byCode;
   } catch (error) {
-    return 
-      { error: (error as Error).message }
+    return { error: (error as Error).message }
   }
 }
 
-// Get the feature flags by specific organization
+/**
+ * 
+ * Fetches organization-level feature flags from Kinde. 
+ * 
+ * @param organizationId - The ID of the organization we want to retrieve the flags from. 
+ * @returns Returns them as a flat map with the flag name and the value. 
+ */
 async function getOrganizationFeatureFlags(organizationId: string) {
 
 
@@ -85,15 +132,9 @@ async function getOrganizationFeatureFlags(organizationId: string) {
         }
       }
     );
-    const data = await response.json();
-    console.log("data are being logged on the organization function:", data);
-    const flags = data?.feature_flags;
-
-
-    console.log("flags are being logged on the organization function:", flags);
-
-    const orgFeatureFlags = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, any]) => [key, value.value ]));
-    console.log(orgFeatureFlags);
+    const data = await response.json() as { feature_flags: Record<string, KindeFlag> };
+    const flags = data?.feature_flags ?? {};
+    const orgFeatureFlags = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, KindeFlag]) => [key, value.value]));
 
     return orgFeatureFlags;
   } catch (error) {
@@ -101,14 +142,28 @@ async function getOrganizationFeatureFlags(organizationId: string) {
   }
 }
 
-export async function GET() {
-  console.log("We are getting everything...")
-  const orgId = "org_dddca967a530";
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
 
-  const flags = await getEnvironmentFeatureFlags();
-  const organizationFlags = await getOrganizationFeatureFlags(orgId);
-  console.log("OrganizationFlags are being logged on the last function:", organizationFlags);
+  const orgId = searchParams.get("org");
+  if (!orgId) {
+    return NextResponse.json({ error: "Missing required search param: org" }, { status: 400 });
+  }
+ 
 
-  console.log("We are getting everything... done")
-  return NextResponse.json({"Flags": flags, [`${orgId}`]: organizationFlags});
+  try {
+    
+    const flags = await getEnvironmentFeatureFlags();
+    const organizationFlags = await getOrganizationFeatureFlags(orgId);
+    const envFlags = flags ?? {};
+    const orgFlags = organizationFlags ?? {};
+
+    const overrides_tracker = computeOverrides(envFlags, orgFlags);
+
+    return NextResponse.json({ "Environment flags": flags, [`${orgId}`]: organizationFlags, "Overrides tracker": overrides_tracker });
+  }
+  catch (error) {
+    return { error: (error as Error).message };
+  }
 }
+
