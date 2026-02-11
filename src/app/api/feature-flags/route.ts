@@ -1,17 +1,23 @@
 import { NextResponse } from "next/server";
 
-
-
-// Below we add a label for interfaces
-
 // -----------------------------------------------------------------------------
-// Interfaces
+// Types
 // -----------------------------------------------------------------------------
-
 
 interface KindeFlag {
   value: string | boolean | number;
 }
+
+/** Kinde API response for feature_flags endpoints */
+interface KindeFeatureFlagsResponse {
+  feature_flags?: Record<string, KindeFlag>;
+  error?: string;
+}
+
+/** Result of fetching flags: either a flat map of flag values or an error */
+type FeatureFlagsResult =
+  | Record<string, string | boolean | number>
+  | { error: string };
 
 /**
  * 
@@ -20,20 +26,20 @@ interface KindeFlag {
  * 
  * @param envFlags - Environment (business-level) flags: type, value
  * @param orgFlags - Organization flags: type, value
- * @returns Map of flag code -> true if overriden (environment_flag.value != organization_flag.value)
+ * @returns Map of flag code -> true if overridden (environment_flag.value != organization_flag.value)
  * 
  */
 function computeOverrides(
   envFlags: Record<string, unknown>,
   orgFlags: Record<string, unknown>
 ): Record<string, boolean> {
-  const overrides_tracker: Record<string, boolean> = Object.fromEntries(
+  const overridesTracker: Record<string, boolean> = Object.fromEntries(
     Object.keys(envFlags).map((key) => [
       key,
       envFlags[key] !== orgFlags[key],
     ])
   );
-  return overrides_tracker;
+  return overridesTracker;
 }
 
 /**
@@ -70,7 +76,16 @@ async function getAuthToken() {
     })
   });
 
-  const data = await response.json();
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const message = typeof body?.error === "string" ? body.error : "Token request failed";
+    throw new Error(`Kinde M2M: ${message}`);
+  }
+
+  const data = (await response.json()) as { access_token?: string };
+  if (!data.access_token) {
+    throw new Error("Kinde M2M: No access_token in response");
+  }
   return data.access_token;
 }
 
@@ -81,7 +96,7 @@ async function getAuthToken() {
  * @returns A map of feature flags with the flag name and the value. 
  * 
  */
-async function getEnvironmentFeatureFlags() {
+async function getEnvironmentFeatureFlags(): Promise<FeatureFlagsResult> {
   try {
     const token = await getAuthToken();
 
@@ -90,24 +105,23 @@ async function getEnvironmentFeatureFlags() {
       {
         headers: {
           Authorization: `Bearer ${token}`,
-          Accept: "application/json"
-        }
+          Accept: "application/json",
+        },
       }
     );
 
-    const data = await response.json() as { feature_flags: Record<string, KindeFlag> };
-    const flags = data?.feature_flags ?? {};
-
-    if ('error' in data) {
-      return { error: data.error };
+    const data = (await response.json()) as KindeFeatureFlagsResponse;
+    if (!response.ok || data.error) {
+      return { error: data.error ?? `HTTP ${response.status}` };
     }
 
-    const envFeatureFlags = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, KindeFlag]) => [key, value.value]));
-
-    return envFeatureFlags
-
+    const flags = data.feature_flags ?? {};
+    const envFeatureFlags = Object.fromEntries(
+      Object.entries(flags).map(([key, value]) => [key, value.value])
+    );
+    return envFeatureFlags;
   } catch (error) {
-    return { error: (error as Error).message }
+    return { error: (error as Error).message };
   }
 }
 
@@ -118,9 +132,9 @@ async function getEnvironmentFeatureFlags() {
  * @param organizationId - The ID of the organization we want to retrieve the flags from. 
  * @returns Returns them as a flat map with the flag name and the value. 
  */
-async function getOrganizationFeatureFlags(organizationId: string) {
-
-
+async function getOrganizationFeatureFlags(
+  organizationId: string
+): Promise<FeatureFlagsResult> {
   try {
     const token = await getAuthToken();
     const response = await fetch(
@@ -128,42 +142,74 @@ async function getOrganizationFeatureFlags(organizationId: string) {
       {
         headers: {
           Authorization: `Bearer ${token}`,
-          Accept: "application/json"
-        }
+          Accept: "application/json",
+        },
       }
     );
-    const data = await response.json() as { feature_flags: Record<string, KindeFlag> };
-    const flags = data?.feature_flags ?? {};
-    const orgFeatureFlags = Object.fromEntries(Object.entries(flags).map(([key, value]: [string, KindeFlag]) => [key, value.value]));
 
+    const data = (await response.json()) as KindeFeatureFlagsResponse;
+    if (!response.ok || data.error) {
+      return { error: data.error ?? `HTTP ${response.status}` };
+    }
+
+    const flags = data.feature_flags ?? {};
+    const orgFeatureFlags = Object.fromEntries(
+      Object.entries(flags).map(([key, value]) => [key, value.value])
+    );
     return orgFeatureFlags;
   } catch (error) {
     return { error: (error as Error).message };
   }
 }
 
+/**
+ * GET /api/feature-flags?org=<organizationId>
+ *
+ * Returns environment and organization feature flags from Kinde, plus which
+ * flags are overridden per organization. Requires KINDE_ISSUER_URL,
+ * KINDE_M2M_CLIENT_ID, and KINDE_M2M_CLIENT_SECRET.
+ */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
+  const orgId = searchParams.get("org")?.trim();
 
-  const orgId = searchParams.get("org");
   if (!orgId) {
-    return NextResponse.json({ error: "Missing required search param: org" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Missing required search param: org" },
+      { status: 400 }
+    );
   }
- 
 
   try {
-    
-    const flags = await getEnvironmentFeatureFlags();
+    const environmentFlags = await getEnvironmentFeatureFlags();
     const organizationFlags = await getOrganizationFeatureFlags(orgId);
-    const envFlags = flags ?? {};
-    const orgFlags = organizationFlags ?? {};
 
-    const overrides_tracker = computeOverrides(envFlags, orgFlags);
+    if ("error" in environmentFlags) {
+      return NextResponse.json(
+        { error: `Environment flags: ${environmentFlags.error}` },
+        { status: 502 }
+      );
+    }
+    if ("error" in organizationFlags) {
+      return NextResponse.json(
+        { error: `Organization flags: ${organizationFlags.error}` },
+        { status: 502 }
+      );
+    }
 
-    return NextResponse.json({ "Environment flags": flags, [`${orgId}`]: organizationFlags, "Overrides tracker": overrides_tracker });
-  }
-  catch (error) {
-    return { error: (error as Error).message };
+    const overrides = computeOverrides(environmentFlags, organizationFlags);
+
+    return NextResponse.json({
+      orgId,
+      environmentFlags,
+      organizationFlags,
+      overrides,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: (error as Error).message },
+      { status: 500 }
+    );
   }
 }
 
